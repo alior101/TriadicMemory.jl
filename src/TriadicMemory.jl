@@ -1,17 +1,33 @@
 module TriadicMemory
-export create_triadicmemory
-export insert
-export query
-export timing_test
-export memory_errors
+export memorize!
+export query!
+export SDRMemory
 
 # create a triadic memory of size n 
 # inserted vectors are dense vectors of size P integers of value of up to
 # N - specifiying the non zero bit location in the sparse vector 
-function create_triadicmemory(N)
-    mem = zeros(UInt8,N,N,N);
-    return mem
+
+mutable struct SDRMemory
+    N::Int
+    P::Int
+    mem::Array{UInt8, 3}
+
+
+    function SDRMemory()
+        N = 1000
+        P = 10
+        new(N,P,zeros(UInt8,N,N,N))
+    end
+
+    function SDRMemory(N::Int,P::Int)
+        if P*10 > N 
+            error("SDR Memory is not sparse enough: P should be less than or equal to N/10...")
+        end
+        new(N,P,zeros(UInt8,N,N,N))
+    end
+
 end
+
 
 function binarize(x,r,N,P)
     sorted = sort(x)
@@ -40,27 +56,36 @@ end
 # idea taken from Scheme implementation of Roger Turner
 # https://github.com/rogerturner/TriadicMemory/blob/main/triadicmemory.ss
 
-function insert(mem, xvec,yvec,zvec)
+function memorize!(s::SDRMemory, xvec::Vector{Int64},yvec::Vector{Int64},zvec::Vector{Int64})
+    P = ismissing(xvec) ? (ismissing(yvec) ? (ismissing(zvec) ? length(xvec) : length(zvec)) : length(yvec)) : length(xvec)
+    if P != s.P
+        error("wrong vector size to insert into memory")
+    end
+
     for z in zvec
         for y in yvec
             for x in xvec
-                mem[x,y,z] += 1
+                s.mem[x,y,z] += 1
             end
         end
     end
     for x in xvec
         for y in yvec
             for z in zvec
-                mem[z,y,x] += 16
+                s.mem[z,y,x] += 16
             end
         end
     end
 end 
 
 
-function query(mem,xvec,yvec,zvec)
-    N = size(mem,1)
+function query!(s::SDRMemory,xvec,yvec,zvec)
+    N = size(s.mem,1)
     P = ismissing(xvec) ? (ismissing(yvec) ? (ismissing(zvec) ? length(xvec) : length(zvec)) : length(yvec)) : length(xvec)
+    if P != s.P
+        error("wrong vector size to use for query memory")
+    end
+
     temp_vec_N = zeros(Int16,N)
     ret_vec = zeros(Int16,P)
     
@@ -72,19 +97,19 @@ function query(mem,xvec,yvec,zvec)
     if ismissing(zvec)
         for x in xvec
             @simd  for y in yvec
-                @views temp_vec_N += (mem[:,y,x] .>> 4)               
+                @views temp_vec_N += (s.mem[:,y,x] .>> 4)               
             end
         end
     elseif  ismissing(xvec)
         for y in yvec
             @simd  for z in zvec
-                @views temp_vec_N += (mem[:,y,z] .& 0x0f)
+                @views temp_vec_N += (s.mem[:,y,z] .& 0x0f)
             end
         end
     elseif ismissing(yvec)
         for x in xvec
             @simd for z in zvec
-                @views temp_vec_N += (mem[x,:,z] .& 0x0f)                
+                @views temp_vec_N += (s.mem[x,:,z] .& 0x0f)                
             end
         end
     end
@@ -92,230 +117,5 @@ function query(mem,xvec,yvec,zvec)
     binarize(temp_vec_N,ret_vec, N,P)
     return ret_vec
 end 
-
-function timing_test()
-
-    N = 1000
-    P = 10
-    
-    CYCLES = 10000
-    println("inserting $CYCLES vectors")
-    w = @elapsed begin
-        global CYCLES 
-        mem = create_triadicmemory(N)
-
-        # prepare test vectors
-        x_input = zeros(Int64,CYCLES,P)
-        y_input = zeros(Int64,CYCLES,P)
-        z_input = zeros(Int64,CYCLES,P)
-
-        for i in 1:CYCLES
-            # ceil will make sure that the smallest number is 1 
-            x_input[i,:] = sort(ceil.(Int,rand(P)*N))
-            y_input[i,:] = sort(ceil.(Int,rand(P)*N))
-            z_input[i,:] = sort(ceil.(Int,rand(P)*N))
-        end 
-    
-        # check that the vectors dont have identical numbers 
-
-        while true 
-            redo = false
-            for i in 1:CYCLES
-                for k in 1:P-1
-                    if x_input[i,k] == x_input[i,k+1]
-                        x_input[i,k+1] = ceil(Int,rand()*N)
-                        x_input[i,:] = sort(x_input[i,:])
-                        redo = true
-                        break
-                    end
-                    if y_input[i,k] == y_input[i,k+1]
-                        y_input[i,k+1] = ceil(Int,rand()*N)
-                        y_input[i,:] = sort(y_input[i,:])
-                        redo = true
-                        break
-                    end
-                    if z_input[i,k] == z_input[i,k+1]
-                        z_input[i,k+1] = ceil(Int,rand()*N)
-                        z_input[i,:] = sort(z_input[i,:])
-                        redo = true
-                        break
-                    end
-                end
-            end
-            redo || break
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("preparing $CYCLES vectors took $w seconds: $speed per sec")
-    w = @elapsed  for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        insert(mem,x,y,z)
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("inserting $CYCLES vectors took $w seconds: $speed per sec")
-
-
-    # Query Z given x,y
-    ####################
-    errors = 0
-    @time w = @elapsed for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        qz = query(mem,x,y,missing)
-         if  qz != z
-            errors += 1
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("querying z $CYCLES vectors took $w seconds: $speed per sec, $errors errors")
-
-    
-    # Query Y  given x,z
-    ####################
-    errors = 0
-    @time w = @elapsed for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        qy = query(mem,x,missing,z)
-         if  qy != y
-            errors += 1
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("querying y $CYCLES vectors took $w seconds: $speed per sec, $errors errors")
-
-    # Query X given z,y
-    ####################
-    errors = 0
-    @time w = @elapsed for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        qx = query(mem,missing,y,z)
-         if  qx != x
-             errors += 1
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("querying x $CYCLES vectors took $w seconds: $speed per sec, $errors errors")
-    return errors
-end 
-
-function memory_errors()
-
-    N = 1000
-    P = 10
-    
-    CYCLES = 100
-    println("inserting $CYCLES vectors")
-    w = @elapsed begin
-        global CYCLES 
-        mem = create_triadicmemory(N)
-
-        # prepare test vectors
-        x_input = zeros(Int64,CYCLES,P)
-        y_input = zeros(Int64,CYCLES,P)
-        z_input = zeros(Int64,CYCLES,P)
-
-        for i in 1:CYCLES
-            # ceil will make sure that the smallest number is 1 
-            x_input[i,:] = sort(ceil.(Int,rand(P)*N))
-            y_input[i,:] = sort(ceil.(Int,rand(P)*N))
-            z_input[i,:] = sort(ceil.(Int,rand(P)*N))
-        end 
-    
-        # check that the vectors dont have identical numbers 
-
-        while true 
-            redo = false
-            for i in 1:CYCLES
-                for k in 1:P-1
-                    if x_input[i,k] == x_input[i,k+1]
-                        x_input[i,k+1] = ceil(Int,rand()*N)
-                        x_input[i,:] = sort(x_input[i,:])
-                        redo = true
-                        break
-                    end
-                    if y_input[i,k] == y_input[i,k+1]
-                        y_input[i,k+1] = ceil(Int,rand()*N)
-                        y_input[i,:] = sort(y_input[i,:])
-                        redo = true
-                        break
-                    end
-                    if z_input[i,k] == z_input[i,k+1]
-                        z_input[i,k+1] = ceil(Int,rand()*N)
-                        z_input[i,:] = sort(z_input[i,:])
-                        redo = true
-                        break
-                    end
-                end
-            end
-            redo || break
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("preparing $CYCLES vectors took $w seconds: $speed per sec")
-    w = @elapsed  for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        insert(mem,x,y,z)
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("inserting $CYCLES vectors took $w seconds: $speed per sec")
-
-
-    # Query Z given x,y
-    ####################
-    errors = 0
-    @time w = @elapsed for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        qz = query(mem,x,y,missing)
-         if  qz != z
-            errors += 1
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("querying z $CYCLES vectors took $w seconds: $speed per sec, $errors errors")
-
-    
-    # Query Y  given x,z
-    ####################
-    errors = 0
-    @time w = @elapsed for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        qy = query(mem,x,missing,z)
-         if  qy != y
-            errors += 1
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("querying y $CYCLES vectors took $w seconds: $speed per sec, $errors errors")
-
-    # Query X given z,y
-    ####################
-    errors = 0
-    @time w = @elapsed for i in 1:CYCLES
-        x = x_input[i,:]
-        y = y_input[i,:]
-        z = z_input[i,:]
-        qx = query(mem,missing,y,z)
-         if  qx != x
-             errors += 1
-        end
-    end
-    speed = round(CYCLES/w, digits=2)
-    println("querying x $CYCLES vectors took $w seconds: $speed per sec, $errors errors")
-    return errors
-end 
-
 
 end
